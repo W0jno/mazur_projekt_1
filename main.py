@@ -11,13 +11,13 @@ from tensorflow.keras.utils import to_categorical
 # ==========================================
 # 1. PARAMETRY I USTAWIENIA
 # ==========================================
-CLASSES = ['G', 'D', 'L', 'P', 'LG', 'PG', 'LD', 'PD'] # Zmienione na tekst dla bezpieczeństwa wykresów PDF (Góra, Dół, Lewo, itd.)
-CHARS = ['↑', '↓', '←', '→', '↖', '↗', '↙', '↘'] # Znaki do rysowania
+CLASSES = ['G', 'D', 'L', 'P', 'LG', 'PG', 'LD', 'PD'] 
+CHARS = ['↑', '↓', '←', '→', '↖', '↗', '↙', '↘'] 
 NUM_CLASSES = len(CLASSES)
 SAMPLES_PER_CLASS = 100
 IMG_SIZE = 32
 
-FONT_PATH = '/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf' # Upewnij się, że masz tę czcionkę lub podaj pełną ścieżkę
+FONT_PATH = '/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf' # Ścieżka do czcionki
 
 # ==========================================
 # 2. GENEROWANIE DANYCH
@@ -52,7 +52,7 @@ def augment_image(img, force_noise=False):
     arr = np.array(img_aug)
     
     if force_noise or random.random() > 0.7:
-        noise = np.random.normal(0, 25, arr.shape) # Zwiększony szum dla lepszego efektu na PDF
+        noise = np.random.normal(0, 25, arr.shape) 
         arr = arr + noise
         arr = np.clip(arr, 0, 255)
         
@@ -67,13 +67,12 @@ for label, char in enumerate(CHARS):
     base_img = generate_base_image(char, FONT_PATH)
     
     for i in range(SAMPLES_PER_CLASS):
-        is_noisy = (i % 5 == 0) # Co 5 obrazek ma wymuszony mocny szum
+        is_noisy = (i % 5 == 0) 
         aug_arr = augment_image(base_img, force_noise=is_noisy)
         
         X_data.append(aug_arr)
         y_data.append(label)
         
-        # Zbieramy równo 20 czystych i 20 zaszumionych do końcowego zadania
         if not is_noisy and len(clean_samples_eval) < 20:
             clean_samples_eval.append(aug_arr)
             clean_labels_eval.append(label)
@@ -96,7 +95,6 @@ plt.close()
 print("Zapisano: obraz_wejsciowy.pdf")
 
 # --- WYMÓG 2: Pliki do uczenia/testowania ---
-# Zapisujemy wygenerowane macierze do plików, by prowadzący mógł je podejrzeć
 np.save('dane_wejsciowe_X.npy', X_data)
 np.save('etykiety_y.npy', y_data)
 print("Zapisano pliki bazy danych: dane_wejsciowe_X.npy, etykiety_y.npy")
@@ -163,8 +161,34 @@ def generate_results_pdf(samples, true_labels, filename, title):
     plt.close()
     print(f"Zapisano wyniki klasyfikacji: {filename}")
 
-# --- WYMÓG 4: Pokazać dla losowych obrazków wynik klasyfikacji ---
 generate_results_pdf(clean_samples_eval, clean_labels_eval, 'wyniki_klasyfikacji_czyste.pdf', 'Wyniki klasyfikacji - 20 przypadkow bazowych')
 generate_results_pdf(noisy_samples_eval, noisy_labels_eval, 'wyniki_klasyfikacji_szum.pdf', 'Wyniki klasyfikacji - 20 przypadkow zaszumionych')
 
-print("\nKoniec! Wszystkie wymagane pliki zostały wygenerowane w folderze ze skryptem.")
+print("\nKoniec procesu uczenia i zapisu PDF!")
+
+# ==========================================
+# 5. TESTOWE WCZYTANIE I WYŚWIETLENIE Z PLIKÓW .NPY
+# ==========================================
+print("\nWczytywanie zapisanych danych z plików .npy w celu weryfikacji...")
+loaded_X = np.load('dane_wejsciowe_X.npy')
+loaded_y = np.load('etykiety_y.npy')
+
+print(f"Pomyślnie wczytano tablice o kształtach: X={loaded_X.shape}, y={loaded_y.shape}")
+
+# Otwieramy okienko i wyświetlamy 5 losowych obrazków z wczytanego pliku
+plt.figure(figsize=(12, 3))
+plt.suptitle("Weryfikacja: Wczytano obrazki bezposrednio z pliku .npy", fontsize=12)
+
+for i in range(5):
+    # Losujemy indeks obrazka od 0 do 799
+    idx = random.randint(0, len(loaded_X) - 1)
+    
+    ax = plt.subplot(1, 5, i + 1)
+    ax.imshow(loaded_X[idx].reshape(32, 32), cmap='gray', vmin=0, vmax=255)
+    ax.set_title(f"Klasa wczytana: {CLASSES[loaded_y[idx]]}", fontsize=10)
+    ax.axis('off')
+
+plt.tight_layout()
+plt.savefig('weryfikacja_npy.pdf')
+plt.close()
+print("Zapisano testowy odczyt z pliku .npy jako: weryfikacja_npy.pdf")
