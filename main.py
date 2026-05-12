@@ -1,194 +1,374 @@
+import os
+import math
+import random
 import numpy as np
 import matplotlib.pyplot as plt
-from PIL import Image, ImageDraw, ImageFont, ImageFilter
-import random
-import os
-from sklearn.model_selection import train_test_split
-from tensorflow.keras.models import Sequential
-from tensorflow.keras.layers import Conv2D, AveragePooling2D, Flatten, Dense
-from tensorflow.keras.utils import to_categorical
+from matplotlib.backends.backend_pdf import PdfPages
+from PIL import Image, ImageDraw, ImageFilter
+import torch
+import torch.nn as nn
+import torch.optim as optim
+from torch.utils.data import TensorDataset, DataLoader
+from sklearn.metrics import confusion_matrix
 
-# ==========================================
-# 1. PARAMETRY I USTAWIENIA
-# ==========================================
-CLASSES = ['G', 'D', 'L', 'P', 'LG', 'PG', 'LD', 'PD'] 
-CHARS = ['↑', '↓', '←', '→', '↖', '↗', '↙', '↘'] 
-NUM_CLASSES = len(CLASSES)
-SAMPLES_PER_CLASS = 100
-IMG_SIZE = 32
+# =====================================================================
+# 1. GENERACJA I AUGMENTACJA DANYCH
+# =====================================================================
 
-FONT_PATH = '/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf' # Ścieżka do czcionki
-
-# ==========================================
-# 2. GENEROWANIE DANYCH
-# ==========================================
-def generate_base_image(char, font_path, size=32):
-    img = Image.new('L', (size, size), color=255)
+def draw_base_emoticon(emoticon_type):
+    """
+    Rysuje bazowy symbol 32x32 w skali szarości (0-255).
+    Zachowuje spójny, monochromatyczny wariant (jasne linie na ciemnym tle).
+    """
+    img = Image.new('L', (32, 32), color=0)
     draw = ImageDraw.Draw(img)
-    try:
-        font = ImageFont.truetype(font_path, 20)
-    except IOError:
-        print(f"BŁĄD: Nie znaleziono czcionki {font_path}.")
-        exit()
-        
-    bbox = draw.textbbox((0,0), char, font=font)
-    w = bbox[2] - bbox[0]
-    h = bbox[3] - bbox[1]
-    x = (size - w) / 2
-    y = (size - h) / 2 - bbox[1]
     
-    draw.text((x, y), char, fill=0, font=font)
+    if emoticon_type == 0:    # ☺ Uśmiech
+        draw.ellipse([3, 3, 28, 28], outline=255, width=2)
+        draw.rectangle([10, 10, 11, 12], fill=255)
+        draw.rectangle([20, 10, 21, 12], fill=255)
+        draw.arc([10, 14, 21, 23], start=20, end=160, fill=255, width=2)
+        
+    elif emoticon_type == 1:  # ☹ Smutek
+        draw.ellipse([3, 3, 28, 28], outline=255, width=2)
+        draw.rectangle([10, 11, 11, 13], fill=255)
+        draw.rectangle([20, 11, 21, 13], fill=255)
+        draw.arc([10, 17, 21, 25], start=200, end=340, fill=255, width=2)
+        
+    elif emoticon_type == 2:  # ⚇ Zdziwienie / Neutralny
+        draw.ellipse([3, 3, 28, 28], outline=255, width=2)
+        draw.rectangle([10, 10, 11, 12], fill=255)
+        draw.rectangle([20, 10, 21, 12], fill=255)
+        draw.ellipse([13, 18, 18, 23], outline=255, width=2)
+        
+    elif emoticon_type == 3:  # ☼ Słońce
+        draw.ellipse([9, 9, 22, 22], outline=255, width=2)
+        for angle in range(0, 360, 45):
+            rad = math.radians(angle)
+            x1, y1 = 15.5 + 8 * math.cos(rad), 15.5 + 8 * math.sin(rad)
+            x2, y2 = 15.5 + 13 * math.cos(rad), 15.5 + 13 * math.sin(rad)
+            draw.line([x1, y1, x2, y2], fill=255, width=2)
+            
+    elif emoticon_type == 4:  # ☽ Księżyc rosnący
+        draw.ellipse([5, 3, 26, 24], fill=255)
+        draw.ellipse([2, 3, 21, 24], fill=0)
+        
+    elif emoticon_type == 5:  # ☾ Księżyc malejący
+        draw.ellipse([5, 3, 26, 24], fill=255)
+        draw.ellipse([10, 3, 29, 24], fill=0)
+        
+    elif emoticon_type == 6:  # ☯ Yin-Yang
+        draw.ellipse([4, 4, 27, 27], outline=255, width=2)
+        draw.chord([4, 4, 27, 27], start=90, end=270, fill=255)
+        draw.ellipse([10, 4, 21, 15.5], fill=255)
+        draw.ellipse([10, 15.5, 21, 27], fill=0)
+        draw.ellipse([14.5, 8.5, 16.5, 10.5], fill=0)
+        draw.ellipse([14.5, 20.5, 16.5, 22.5], fill=255)
+        
+    elif emoticon_type == 7:  # ☮ Pacyfka
+        draw.ellipse([4, 4, 27, 27], outline=255, width=2)
+        draw.line([15.5, 4, 15.5, 27], fill=255, width=2)
+        draw.line([15.5, 15.5, 6, 24], fill=255, width=2)
+        draw.line([15.5, 15.5, 25, 24], fill=255, width=2)
+        
     return img
 
-def augment_image(img, force_noise=False):
+def augment_image(img):
+    """
+    Dodaje zakłócenia, przesunięcia, rozmycia oraz pochylenia/obroty.
+    """
     angle = random.uniform(-15, 15)
+    img = img.rotate(angle, resample=Image.BILINEAR, fillcolor=0)
+    
     dx = random.randint(-3, 3)
     dy = random.randint(-3, 3)
-    img_aug = img.rotate(angle, fillcolor=255, translate=(dx, dy))
+    arr = np.array(img)
+    arr = np.roll(arr, shift=(dy, dx), axis=(0, 1))
     
-    if random.random() > 0.5:
-        img_aug = img_aug.filter(ImageFilter.GaussianBlur(radius=random.uniform(0.5, 1.2)))
+    if dy > 0: arr[:dy, :] = 0
+    elif dy < 0: arr[dy:, :] = 0
+    if dx > 0: arr[:, :dx] = 0
+    elif dx < 0: arr[:, dx:] = 0
+    img = Image.fromarray(arr)
     
-    arr = np.array(img_aug)
-    
-    if force_noise or random.random() > 0.7:
-        noise = np.random.normal(0, 25, arr.shape) 
-        arr = arr + noise
-        arr = np.clip(arr, 0, 255)
+    if random.random() < 0.5:
+        img = img.filter(ImageFilter.GaussianBlur(radius=random.uniform(0.5, 1.2)))
         
-    return arr.astype(np.uint8)
-
-print("Generowanie zbioru danych...")
-X_data, y_data = [], []
-clean_samples_eval, clean_labels_eval = [], []
-noisy_samples_eval, noisy_labels_eval = [], []
-
-for label, char in enumerate(CHARS):
-    base_img = generate_base_image(char, FONT_PATH)
+    arr = np.array(img, dtype=np.float32)
+    noise = np.random.normal(loc=0, scale=15, size=arr.shape)
+    arr = np.clip(arr + noise, 0, 255).astype(np.uint8)
     
-    for i in range(SAMPLES_PER_CLASS):
-        is_noisy = (i % 5 == 0) 
-        aug_arr = augment_image(base_img, force_noise=is_noisy)
-        
-        X_data.append(aug_arr)
-        y_data.append(label)
-        
-        if not is_noisy and len(clean_samples_eval) < 20:
-            clean_samples_eval.append(aug_arr)
-            clean_labels_eval.append(label)
-        elif is_noisy and len(noisy_samples_eval) < 20:
-            noisy_samples_eval.append(aug_arr)
-            noisy_labels_eval.append(label)
+    return arr
 
-X_data = np.array(X_data).reshape(-1, IMG_SIZE, IMG_SIZE, 1)
-y_data = np.array(y_data)
+def generate_dataset():
+    """
+    Generuje zbiór danych dla 8 klas, po 100 próbek na klasę.
+    """
+    X, y = [], []
+    for class_idx in range(8):
+        base_img = draw_base_emoticon(class_idx)
+        for _ in range(100):
+            aug_arr = augment_image(base_img)
+            X.append(aug_arr)
+            y.append(class_idx)
+            
+    return np.array(X, dtype=np.uint8), np.array(y, dtype=np.int64)
 
-# --- WYMÓG 1: Obraz wejściowy w formacie graficznym jako jedna strona PDF ---
-fig, axes = plt.subplots(4, 5, figsize=(8, 10))
-fig.suptitle("Obraz wejściowy - przykladowe wygenerowane znaki", fontsize=14)
-for i, ax in enumerate(axes.flat):
-    if i < len(X_data):
-        ax.imshow(X_data[i].reshape(32, 32), cmap='gray', vmin=0, vmax=255)
-    ax.axis('off')
-plt.savefig('obraz_wejsciowy.pdf')
-plt.close()
-print("Zapisano: obraz_wejsciowy.pdf")
+# =====================================================================
+# 2. ZAPIS ZBIORÓW DANYCH DO PLIKÓW PDF (WYMÓG SPECYFIKACJI)
+# =====================================================================
 
-# --- WYMÓG 2: Pliki do uczenia/testowania ---
-np.save('dane_wejsciowe_X.npy', X_data)
-np.save('etykiety_y.npy', y_data)
-print("Zapisano pliki bazy danych: dane_wejsciowe_X.npy, etykiety_y.npy")
-
-# Normalizacja i podział danych
-X_data_norm = X_data / 255.0
-y_data_cat = to_categorical(y_data, NUM_CLASSES)
-X_train, X_test, y_train, y_test = train_test_split(X_data_norm, y_data_cat, test_size=0.5, random_state=42)
-
-# ==========================================
-# 3. BUDOWA I TRENING SIECI
-# ==========================================
-model = Sequential([
-    Conv2D(6, kernel_size=(5, 5), activation='relu', input_shape=(IMG_SIZE, IMG_SIZE, 1)),
-    AveragePooling2D(pool_size=(2, 2)),
-    Conv2D(16, kernel_size=(5, 5), activation='relu'),
-    AveragePooling2D(pool_size=(2, 2)),
-    Flatten(),
-    Dense(120, activation='relu'),
-    Dense(84, activation='relu'),
-    Dense(NUM_CLASSES, activation='softmax')
-])
-
-model.compile(optimizer='adam', loss='categorical_crossentropy', metrics=['accuracy'])
-
-print("Rozpoczynam uczenie modelu...")
-history = model.fit(X_train, y_train, epochs=15, batch_size=16, validation_data=(X_test, y_test), verbose=1)
-
-# --- WYMÓG 3: Krzywe uczenia (PDF) ---
-plt.figure(figsize=(10, 5))
-plt.plot(history.history['accuracy'], label='Dokladnosc (Trening)')
-plt.plot(history.history['val_accuracy'], label='Dokladnosc (Test)')
-plt.title('Krzywe uczenia')
-plt.xlabel('Epoka')
-plt.ylabel('Dokladnosc')
-plt.legend()
-plt.grid()
-plt.savefig('krzywe_uczenia.pdf')
-plt.close()
-print("Zapisano: krzywe_uczenia.pdf")
-
-# ==========================================
-# 4. WYNIKI KLASYFIKACJI NA PDF (Czyste vs Szum)
-# ==========================================
-def generate_results_pdf(samples, true_labels, filename, title):
-    samples_norm = np.array(samples).reshape(-1, IMG_SIZE, IMG_SIZE, 1) / 255.0
-    preds = np.argmax(model.predict(samples_norm, verbose=0), axis=1)
-    
-    fig, axes = plt.subplots(4, 5, figsize=(12, 10))
-    fig.suptitle(title, fontsize=16)
-    
-    for i, ax in enumerate(axes.flat):
-        if i < len(samples):
-            ax.imshow(samples[i].reshape(32, 32), cmap='gray', vmin=0, vmax=255)
-            true_c = CLASSES[true_labels[i]]
-            pred_c = CLASSES[preds[i]]
-            color = 'green' if true_c == pred_c else 'red'
-            ax.set_title(f"Prawda: {true_c}\nSiec: {pred_c}", color=color, fontsize=10)
+def save_dataset_to_pdf(X, y, filename, title_text, class_names):
+    """
+    Zapisuje podsumowanie oraz zawartość zbioru danych (macierze obrazów) 
+    do wielostronicowego pliku PDF.
+    """
+    print(f"Generowanie pliku danych: {filename}...")
+    with PdfPages(filename) as pdf:
+        # Strona tytułowa i statystyki
+        fig, ax = plt.subplots(figsize=(8, 6))
         ax.axis('off')
+        ax.text(0.5, 0.9, title_text, fontsize=16, fontweight='bold', ha='center')
+        ax.text(0.5, 0.7, f"Całkowita liczba próbek: {len(X)}", fontsize=12, ha='center')
+        ax.text(0.5, 0.6, "Format: 32x32 piksele, skala szarości (0-255)", fontsize=12, ha='center')
         
-    plt.tight_layout()
-    plt.subplots_adjust(top=0.88)
-    plt.savefig(filename)
-    plt.close()
-    print(f"Zapisano wyniki klasyfikacji: {filename}")
+        # Podsumowanie liczby próbek na klasę
+        unique, counts = np.unique(y, return_counts=True)
+        stats_text = "Liczba próbek w klasach:\n" + "\n".join(
+            [f" - Klasa {cls} ({class_names[cls]}): {cnt} szt." for cls, cnt in zip(unique, counts)]
+        )
+        ax.text(0.1, 0.3, stats_text, fontsize=10, va='top', fontname='DejaVu Sans')
+        pdf.savefig(fig)
+        plt.close()
 
-generate_results_pdf(clean_samples_eval, clean_labels_eval, 'wyniki_klasyfikacji_czyste.pdf', 'Wyniki klasyfikacji - 20 przypadkow bazowych')
-generate_results_pdf(noisy_samples_eval, noisy_labels_eval, 'wyniki_klasyfikacji_szum.pdf', 'Wyniki klasyfikacji - 20 przypadkow zaszumionych')
+        # Zapis podglądu próbek w siatkach (np. 4x4 próbki na stronę)
+        samples_per_page = 16
+        num_pages = math.ceil(len(X) / samples_per_page)
+        
+        for page in range(num_pages):
+            fig, axes = plt.subplots(4, 4, figsize=(10, 10))
+            fig.suptitle(f"{title_text} - Strona {page+1}/{num_pages}", fontsize=12)
+            
+            start_idx = page * samples_per_page
+            for i, ax in enumerate(axes.flat):
+                cur_idx = start_idx + i
+                if cur_idx < len(X):
+                    ax.imshow(X[cur_idx], cmap='gray', vmin=0, vmax=255)
+                    ax.set_title(f"ID: {cur_idx} | Klasa: {y[cur_idx]}", fontsize=9)
+                ax.axis('off')
+                
+            plt.tight_layout()
+            pdf.savefig(fig)
+            plt.close()
+            
+    print(f"Zapisano pomyślnie: {filename}")
 
-print("\nKoniec procesu uczenia i zapisu PDF!")
+# =====================================================================
+# 3. ARCHITEKTURA LeNet-5
+# =====================================================================
 
-# ==========================================
-# 5. TESTOWE WCZYTANIE I WYŚWIETLENIE Z PLIKÓW .NPY
-# ==========================================
-print("\nWczytywanie zapisanych danych z plików .npy w celu weryfikacji...")
-loaded_X = np.load('dane_wejsciowe_X.npy')
-loaded_y = np.load('etykiety_y.npy')
+class LeNet5(nn.Module):
+    def __init__(self, num_classes):
+        super(LeNet5, self).__init__()
+        self.feature_extractor = nn.Sequential(
+            nn.Conv2d(in_channels=1, out_channels=6, kernel_size=5, stride=1),
+            nn.Tanh(),
+            nn.AvgPool2d(kernel_size=2, stride=2),
+            nn.Conv2d(in_channels=6, out_channels=16, kernel_size=5, stride=1),
+            nn.Tanh(),
+            nn.AvgPool2d(kernel_size=2, stride=2),
+            nn.Conv2d(in_channels=16, out_channels=120, kernel_size=5, stride=1),
+            nn.Tanh()
+        )
+        self.classifier = nn.Sequential(
+            nn.Linear(in_features=120, out_features=84),
+            nn.Tanh(),
+            nn.Linear(in_features=84, out_features=num_classes)
+        )
 
-print(f"Pomyślnie wczytano tablice o kształtach: X={loaded_X.shape}, y={loaded_y.shape}")
+    def forward(self, x):
+        x = self.feature_extractor(x)
+        x = torch.flatten(x, 1)
+        logits = self.classifier(x)
+        return logits
 
-# Otwieramy okienko i wyświetlamy 5 losowych obrazków z wczytanego pliku
-plt.figure(figsize=(12, 3))
-plt.suptitle("Weryfikacja: Wczytano obrazki bezposrednio z pliku .npy", fontsize=12)
+# =====================================================================
+# 4. GŁÓWNA LOGIKA PROGRAMU
+# =====================================================================
 
-for i in range(5):
-    # Losujemy indeks obrazka od 0 do 799
-    idx = random.randint(0, len(loaded_X) - 1)
+def main():
+    random.seed(42)
+    np.random.seed(42)
+    torch.manual_seed(42)
+
+    # Generacja i podział zbioru danych
+    X_all, y_all = generate_dataset()
+    num_classes = len(np.unique(y_all)) # 8 klas
+    class_names = ['☺', '☹', '⚇', '☼', '☽', '☾', '☯', '☮']
     
-    ax = plt.subplot(1, 5, i + 1)
-    ax.imshow(loaded_X[idx].reshape(32, 32), cmap='gray', vmin=0, vmax=255)
-    ax.set_title(f"Klasa wczytana: {CLASSES[loaded_y[idx]]}", fontsize=10)
-    ax.axis('off')
+    X_train_list, y_train_list, X_test_list, y_test_list = [], [], [], []
+    for cls in range(num_classes):
+        cls_mask = (y_all == cls)
+        X_cls = X_all[cls_mask]
+        y_cls = y_all[cls_mask]
+        
+        indices = np.random.permutation(len(X_cls))
+        train_idx, test_idx = indices[:50], indices[50:]
+        
+        X_train_list.append(X_cls[train_idx])
+        y_train_list.append(y_cls[train_idx])
+        X_test_list.append(X_cls[test_idx])
+        y_test_list.append(y_cls[test_idx])
+        
+    X_train = np.concatenate(X_train_list, axis=0)
+    y_train = np.concatenate(y_train_list, axis=0)
+    X_test = np.concatenate(X_test_list, axis=0)
+    y_test = np.concatenate(y_test_list, axis=0)
 
-plt.tight_layout()
-plt.savefig('weryfikacja_npy.pdf')
-plt.close()
-print("Zapisano testowy odczyt z pliku .npy jako: weryfikacja_npy.pdf")
+    # --- REALIZACJA WYMOGÓW PDF ---
+    
+    # 1. Obraz wejściowy jako jedna strona PDF
+    with PdfPages("obrazy_wejsciowe.pdf") as pdf:
+        fig, axes = plt.subplots(4, 8, figsize=(12, 6))
+        fig.suptitle("Weryfikacja bazy - losowe próbki wejściowe (0-255)", fontsize=14)
+        sample_indices = np.random.choice(len(X_all), size=32, replace=False)
+        for ax, idx in zip(axes.flat, sample_indices):
+            ax.imshow(X_all[idx], cmap='gray', vmin=0, vmax=255)
+            ax.set_title(f"{class_names[y_all[idx]]} ({y_all[idx]})", fontname='DejaVu Sans')
+            ax.axis('off')
+        plt.tight_layout()
+        pdf.savefig(fig)
+        plt.close()
+    print("Zapisano plik: obrazy_wejsciowe.pdf")
+
+    # 2. Pliki do uczenia i testowania w formacie PDF
+    save_dataset_to_pdf(X_train, y_train, "dane_do_uczenia.pdf", "Zbiór Uczący (Train Set)", class_names)
+    save_dataset_to_pdf(X_test, y_test, "dane_do_testowania.pdf", "Zbiór Testowy (Test Set)", class_names)
+
+    # Przygotowanie tensorów
+    t_X_train = torch.tensor(X_train, dtype=torch.float32).unsqueeze(1)
+    t_y_train = torch.tensor(y_train, dtype=torch.int64)
+    t_X_test = torch.tensor(X_test, dtype=torch.float32).unsqueeze(1)
+    t_y_test = torch.tensor(y_test, dtype=torch.int64)
+
+    train_loader = DataLoader(TensorDataset(t_X_train, t_y_train), batch_size=16, shuffle=True)
+    
+    model = LeNet5(num_classes=num_classes)
+    criterion = nn.CrossEntropyLoss()
+    optimizer = optim.Adam(model.parameters(), lr=0.0002)
+
+    # Trening
+    epochs = 40
+    train_losses, train_accs = [], []
+    
+    print(f"\nRozpoczęcie trenowania modelu LeNet-5 na {num_classes} klasach...")
+    for epoch in range(epochs):
+        model.train()
+        running_loss, correct, total = 0.0, 0, 0
+        
+        for inputs, targets in train_loader:
+            optimizer.zero_grad()
+            outputs = model(inputs)
+            loss = criterion(outputs, targets)
+            loss.backward()
+            optimizer.step()
+            
+            running_loss += loss.item() * inputs.size(0)
+            _, predicted = outputs.max(1)
+            total += targets.size(0)
+            correct += predicted.eq(targets).sum().item()
+            
+        epoch_loss = running_loss / total
+        epoch_acc = correct / total
+        train_losses.append(epoch_loss)
+        train_accs.append(epoch_acc)
+        
+        if (epoch + 1) % 10 == 0 or epoch == 0:
+            print(f"Epoka [{epoch+1}/{epochs}] | Strata: {epoch_loss:.4f} | Dokładność: {epoch_acc*100:.1f}%")
+
+    # 3. Krzywe uczenia jako PDF
+    with PdfPages("krzywe_uczenia.pdf") as pdf:
+        fig, ax1 = plt.subplots(figsize=(8, 5))
+        ax1.set_xlabel('Epoka')
+        ax1.set_ylabel('Strata (Loss)', color='tab:red')
+        ax1.plot(range(1, epochs+1), train_losses, color='tab:red', label='Strata')
+        ax1.tick_params(axis='y', labelcolor='tab:red')
+
+        ax2 = ax1.twinx()  
+        ax2.set_ylabel('Dokładność (Accuracy)', color='tab:blue')
+        ax2.plot(range(1, epochs+1), train_accs, color='tab:blue', label='Dokładność')
+        ax2.tick_params(axis='y', labelcolor='tab:blue')
+
+        plt.title('Krzywe uczenia LeNet-5 (8 klas)')
+        fig.tight_layout()
+        pdf.savefig(fig)
+        plt.close()
+    print("Zapisano plik: krzywe_uczenia.pdf")
+
+    # Ewaluacja
+    model.eval()
+    with torch.no_grad():
+        test_outputs = model(t_X_test)
+        _, test_preds = test_outputs.max(1)
+        test_acc = test_preds.eq(t_y_test).sum().item() / t_y_test.size(0)
+        cm = confusion_matrix(y_test, test_preds.numpy())
+
+    print(f"\n--- WYNIKI NA ZBIORZE TESTOWYM ---")
+    print(f"Dokładność: {test_acc*100:.2f}%")
+    print("Macierz pomyłek:")
+    print(cm)
+
+    # 4. Wyniki klasyfikacji (losowe obrazki z bazy i z szumem)
+    indices_eval = np.random.choice(len(X_all), size=20, replace=False)
+    samples_normal = X_all[indices_eval]
+    labels_true = y_all[indices_eval]
+    
+    samples_noisy = []
+    for img_arr in samples_normal:
+        noise = np.random.normal(0, 45, img_arr.shape)
+        noisy_arr = np.clip(img_arr.astype(np.float32) + noise, 0, 255).astype(np.uint8)
+        samples_noisy.append(noisy_arr)
+    samples_noisy = np.array(samples_noisy)
+
+    t_normal = torch.tensor(samples_normal, dtype=torch.float32).unsqueeze(1)
+    t_noisy = torch.tensor(samples_noisy, dtype=torch.float32).unsqueeze(1)
+
+    with torch.no_grad():
+        preds_normal = model(t_normal).max(1)[1].numpy()
+        preds_noisy = model(t_noisy).max(1)[1].numpy()
+
+    with PdfPages("wyniki_klasyfikacji.pdf") as pdf:
+        fig, axes = plt.subplots(4, 5, figsize=(10, 8))
+        fig.suptitle("Klasyfikacja - 20 losowych przypadków z bazy", fontsize=14)
+        for i, ax in enumerate(axes.flat):
+            ax.imshow(samples_normal[i], cmap='gray', vmin=0, vmax=255)
+            color = 'green' if preds_normal[i] == labels_true[i] else 'red'
+            ax.set_title(f"P:{preds_normal[i]} R:{labels_true[i]}", color=color)
+            ax.axis('off')
+        plt.tight_layout()
+        pdf.savefig(fig)
+        plt.close()
+
+        fig, axes = plt.subplots(4, 5, figsize=(10, 8))
+        fig.suptitle("Klasyfikacja - 20 przypadków z dodanym szumem", fontsize=14)
+        for i, ax in enumerate(axes.flat):
+            ax.imshow(samples_noisy[i], cmap='gray', vmin=0, vmax=255)
+            color = 'green' if preds_noisy[i] == labels_true[i] else 'red'
+            ax.set_title(f"P:{preds_noisy[i]} R:{labels_true[i]}", color=color)
+            ax.axis('off')
+        plt.tight_layout()
+        pdf.savefig(fig)
+        plt.close()
+
+    print("Zapisano plik: wyniki_klasyfikacji.pdf")
+    
+    # Podsumowanie wygenerowanych artefaktów
+    print("\nProjekt kompletny. Spis wygenerowanych plików PDF:")
+    print(" 1. obrazy_wejsciowe.pdf    - Jedna strona z przeglądem klas")
+    print(" 2. dane_do_uczenia.pdf     - Zbiór treningowy (wizualizacja próbek i metadane)")
+    print(" 3. dane_do_testowania.pdf  - Zbiór testowy (wizualizacja próbek i metadane)")
+    print(" 4. krzywe_uczenia.pdf      - Wykresy loss i accuracy z procesu treningu")
+    print(" 5. wyniki_klasyfikacji.pdf - Predykcje dla 20 obrazów czystych i 20 zaszumionych")
+
+if __name__ == "__main__":
+    main()
